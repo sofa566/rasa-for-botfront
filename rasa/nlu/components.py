@@ -6,40 +6,21 @@ from typing import Any, Dict, Hashable, List, Optional, Set, Text, Tuple, Type, 
 
 import rasa.utils.train_utils
 from rasa.exceptions import MissingDependencyException
+from rasa.nlu.constants import COMPONENT_INDEX
 from rasa.shared.exceptions import RasaException
 from rasa.shared.nlu.constants import TRAINABLE_EXTRACTORS
+from rasa.shared.constants import DOCS_URL_COMPONENTS
 from rasa.nlu.config import RasaNLUModelConfig
 from rasa.shared.exceptions import InvalidConfigException
 from rasa.shared.nlu.training_data.training_data import TrainingData
 from rasa.shared.nlu.training_data.message import Message
-from rasa.nlu.constants import COMPONENT_INDEX
 import rasa.shared.utils.io
+import rasa.utils.common
 
 if typing.TYPE_CHECKING:
     from rasa.nlu.model import Metadata
 
 logger = logging.getLogger(__name__)
-
-
-def find_unavailable_packages(package_names: List[Text]) -> Set[Text]:
-    """Tries to import all package names and returns the packages where it failed.
-
-    Args:
-        package_names: The package names to import.
-
-    Returns:
-        Package names that could not be imported.
-    """
-
-    import importlib
-
-    failed_imports = set()
-    for package in package_names:
-        try:
-            importlib.import_module(package)
-        except ImportError:
-            failed_imports.add(package)
-    return failed_imports
 
 
 def validate_requirements(component_names: List[Optional[Text]]) -> None:
@@ -67,7 +48,7 @@ def validate_requirements(component_names: List[Optional[Text]]) -> None:
                 "the component."
             )
         component_class = registry.get_component_class(component_name)
-        unavailable_packages = find_unavailable_packages(
+        unavailable_packages = rasa.utils.common.find_unavailable_packages(
             component_class.required_packages()
         )
         if unavailable_packages:
@@ -110,7 +91,8 @@ def validate_component_keys(
     for key in provided_keys:
         if key not in allowed_keys:
             rasa.shared.utils.io.raise_warning(
-                f"You have provided an invalid key `{key}` for component `{component_name}` in your pipeline. "
+                f"You have provided an invalid key `{key}` "
+                f"for component `{component_name}` in your pipeline. "
                 f"Valid options for `{component_name}` are:\n- "
                 f"{list_separator.join(allowed_keys)}"
             )
@@ -208,18 +190,36 @@ def validate_pipeline(pipeline: List["Component"]) -> None:
     validate_required_components(pipeline)
 
 
-def any_components_in_pipeline(components: Iterable[Text], pipeline: List["Component"]):
+def any_components_in_pipeline(
+    components: Iterable[Text], pipeline: List["Component"]
+) -> bool:
     """Check if any of the provided components are listed in the pipeline.
 
     Args:
-        components: A list of :class:`rasa.nlu.components.Component`s to check.
+        components: Component class names to check.
         pipeline: A list of :class:`rasa.nlu.components.Component`s.
 
     Returns:
         `True` if any of the `components` are in the `pipeline`, else `False`.
 
     """
-    return any(any(component.name == c for component in pipeline) for c in components)
+    return len(find_components_in_pipeline(components, pipeline)) > 0
+
+
+def find_components_in_pipeline(
+    components: Iterable[Text], pipeline: List["Component"]
+) -> Set[Text]:
+    """Finds those of the given components that are present in the pipeline.
+
+    Args:
+        components: A list of str of component class names to check.
+        pipeline: A list of :class:`rasa.nlu.components.Component`s.
+
+    Returns:
+        A list of str of component class names that are present in the pipeline.
+    """
+    pipeline_component_names = {c.name for c in pipeline}
+    return pipeline_component_names.intersection(components)
 
 
 def validate_required_components_from_data(
@@ -322,6 +322,66 @@ def validate_required_components_from_data(
         )
 
 
+def warn_of_competing_extractors(pipeline: List["Component"]) -> None:
+    """Warns the user when using competing extractors.
+
+    Competing extractors are e.g. `CRFEntityExtractor` and `DIETClassifier`.
+    Both of these look for the same entities based on the same training data
+    leading to ambiguity in the results.
+
+    Args:
+        pipeline: The list of the :class:`rasa.nlu.components.Component`s.
+    """
+    extractors_in_pipeline = find_components_in_pipeline(TRAINABLE_EXTRACTORS, pipeline)
+    if len(extractors_in_pipeline) > 1:
+        rasa.shared.utils.io.raise_warning(
+            f"You have defined multiple entity extractors that do the same job "
+            f"in your pipeline: "
+            f"{', '.join(extractors_in_pipeline)}. "
+            f"This can lead to the same entity getting "
+            f"extracted multiple times. Please read the documentation section "
+            f"on entity extractors to make sure you understand the implications: "
+            f"{DOCS_URL_COMPONENTS}#entity-extractors"
+        )
+
+
+def warn_of_competition_with_regex_extractor(
+    pipeline: List["Component"], data: TrainingData
+) -> None:
+    """Warns when regex entity extractor is competing with a general one.
+
+    This might be the case when the following conditions are all met:
+    * You are using a general entity extractor and the `RegexEntityExtractor`
+    * AND you have regex patterns for entity type A
+    * AND you have annotated text examples for entity type A
+
+    Args:
+        pipeline: The list of the :class:`rasa.nlu.components.Component`s.
+        data: The :class:`rasa.shared.nlu.training_data.training_data.TrainingData`.
+    """
+    present_general_extractors = find_components_in_pipeline(
+        TRAINABLE_EXTRACTORS, pipeline
+    )
+    has_general_extractors = len(present_general_extractors) > 0
+    has_regex_extractor = any_components_in_pipeline(["RegexEntityExtractor"], pipeline)
+
+    regex_entity_types = {rf["name"] for rf in data.regex_features}
+    overlap_between_types = data.entities.intersection(regex_entity_types)
+    has_overlap = len(overlap_between_types) > 0
+
+    if has_general_extractors and has_regex_extractor and has_overlap:
+        rasa.shared.utils.io.raise_warning(
+            f"You have an overlap between the RegexEntityExtractor and the "
+            f"statistical entity extractors {', '.join(present_general_extractors)} "
+            f"in your pipeline. Specifically both types of extractors will "
+            f"attempt to extract entities of the types "
+            f"{', '.join(overlap_between_types)}. This can lead to multiple "
+            f"extraction of entities. Please read RegexEntityExtractor's "
+            f"documentation section to make sure you understand the "
+            f"implications: {DOCS_URL_COMPONENTS}#regexentityextractor"
+        )
+
+
 class MissingArgumentError(ValueError):
     """Raised when not all parameters can be filled from the context / config.
 
@@ -361,9 +421,8 @@ class ComponentMetaclass(type):
     """Metaclass with `name` class property."""
 
     @property
-    def name(cls):
+    def name(cls) -> Text:
         """The name property is a function of the class - its __name__."""
-
         return cls.__name__
 
 
@@ -398,7 +457,8 @@ class Component(metaclass=ComponentMetaclass):
         will be a proper pipeline definition where `ComponentA`
         is the name of the first component of the pipeline.
         """
-        return type(self).name
+        # cast due to https://github.com/python/mypy/issues/7945
+        return typing.cast(str, type(self).name)
 
     @property
     def unique_name(self) -> Text:
@@ -456,9 +516,9 @@ class Component(metaclass=ComponentMetaclass):
         # this is important for e.g. persistence
         component_config["name"] = self.name
 
-        self.component_config = rasa.utils.train_utils.override_defaults(
-            self.defaults, component_config
-        )
+        self.component_config: Dict[
+            Text, Any
+        ] = rasa.utils.train_utils.override_defaults(self.defaults, component_config)
 
         self.partial_processing_pipeline = None
         self.partial_processing_context = None
@@ -483,7 +543,7 @@ class Component(metaclass=ComponentMetaclass):
     def load(
         cls,
         meta: Dict[Text, Any],
-        model_dir: Optional[Text] = None,
+        model_dir: Text,
         model_metadata: Optional["Metadata"] = None,
         cached_component: Optional["Component"] = None,
         **kwargs: Any,
@@ -570,7 +630,8 @@ class Component(metaclass=ComponentMetaclass):
         of components previous to this one.
 
         Args:
-            training_data: The :class:`rasa.shared.nlu.training_data.training_data.TrainingData`.
+            training_data: The
+                :class:`rasa.shared.nlu.training_data.training_data.TrainingData`.
             config: The model configuration parameters.
         """
         pass
@@ -588,7 +649,8 @@ class Component(metaclass=ComponentMetaclass):
         of components previous to this one.
 
         Args:
-            message: The :class:`rasa.shared.nlu.training_data.message.Message` to process.
+            message: The :class:`rasa.shared.nlu.training_data.message.Message` to
+                process.
         """
         pass
 
@@ -634,7 +696,7 @@ class Component(metaclass=ComponentMetaclass):
             del d["partial_processing_pipeline"]
         return d
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: Any) -> bool:
         return self.__dict__ == other.__dict__
 
     def prepare_partial_processing(
@@ -693,7 +755,8 @@ class Component(metaclass=ComponentMetaclass):
             `True` if component can handle specific language, `False` otherwise.
         """
 
-        # If both `supported_language_list` and `not_supported_language_list` are set to `None`,
+        # If both `supported_language_list` and `not_supported_language_list` are set
+        # to `None`,
         # it means: support all languages
         if language is None or (
             cls.supported_language_list is None
@@ -703,9 +766,11 @@ class Component(metaclass=ComponentMetaclass):
 
         # check language supporting settings
         if cls.supported_language_list and cls.not_supported_language_list:
-            # When user set both language supporting settings to not None, it will lead to ambiguity.
+            # When user set both language supporting settings to not None, it will lead
+            # to ambiguity.
             raise RasaException(
-                "Only one of `supported_language_list` and `not_supported_language_list` can be set to not None"
+                "Only one of `supported_language_list` and"
+                "`not_supported_language_list` can be set to not None"
             )
 
         # convert to `list` for membership test
@@ -723,7 +788,8 @@ class Component(metaclass=ComponentMetaclass):
         # check if user provided a valid setting
         if not supported_language_list and not not_supported_language_list:
             # One of language settings must be valid (not None and not a empty list),
-            # There are three combinations of settings are not valid: (None, []), ([], None) and ([], [])
+            # There are three combinations of settings are not valid:
+            # (None, []), ([], None) and ([], [])
             raise RasaException(
                 "Empty lists for both "
                 "`supported_language_list` and `not_supported language_list` "
@@ -735,9 +801,6 @@ class Component(metaclass=ComponentMetaclass):
             return language in supported_language_list
         else:
             return language not in not_supported_language_list
-
-
-C = typing.TypeVar("C", bound=Component)
 
 
 class ComponentBuilder:
@@ -790,7 +853,7 @@ class ComponentBuilder:
         model_dir: Text,
         model_metadata: "Metadata",
         **context: Any,
-    ) -> Component:
+    ) -> Optional[Component]:
         """Loads a component.
 
         Tries to retrieve a component from the cache, else calls
@@ -807,7 +870,6 @@ class ComponentBuilder:
         Returns:
             The loaded component.
         """
-
         from rasa.nlu import registry
 
         try:
@@ -843,13 +905,12 @@ class ComponentBuilder:
         Returns:
             The created component.
         """
-
         from rasa.nlu import registry
         from rasa.nlu.model import Metadata
 
         try:
             component, cache_key = self.__get_cached_component(
-                component_config, Metadata(cfg.as_dict(), None)
+                component_config, Metadata(cfg.as_dict())
             )
             if component is None:
                 component = registry.create_component_by_config(component_config, cfg)
@@ -860,12 +921,3 @@ class ComponentBuilder:
                 f"Failed to create component '{component_config['name']}'. "
                 f"Error: {e}"
             )
-
-    def create_component_from_class(self, component_class: Type[C], **cfg: Any) -> C:
-        """Create a component based on a class and a configuration.
-
-        Mainly used to make use of caching when instantiating component classes."""
-
-        component_config = {"name": component_class.name}
-
-        return self.create_component(component_config, RasaNLUModelConfig(cfg))

@@ -42,7 +42,7 @@ def load(
         config = DEFAULT_CONFIG_PATH
 
     if config is not None:
-        file_config = rasa.shared.utils.io.read_config_file(config)
+        file_config = rasa.shared.utils.io.read_model_configuration(config)
 
     return _load_from_dict(file_config, **kwargs)
 
@@ -143,7 +143,9 @@ class RasaNLUModelConfig:
     def view(self) -> Text:
         return json_to_string(self.__dict__, indent=4)
 
-    def for_component(self, index, defaults=None) -> Dict[Text, Any]:
+    def for_component(
+        self, index: int, defaults: Optional[Dict[Text, Any]] = None
+    ) -> Dict[Text, Any]:
         return component_config_from_pipeline(index, self.pipeline, defaults)
 
     @property
@@ -153,7 +155,7 @@ class RasaNLUModelConfig:
         else:
             return []
 
-    def set_component_attr(self, index, **kwargs) -> None:
+    def set_component_attr(self, index: int, **kwargs: Any) -> None:
         try:
             self.pipeline[index].update(kwargs)
         except IndexError:

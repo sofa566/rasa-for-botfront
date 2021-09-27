@@ -9,7 +9,8 @@ from rasa.shared.importers.importer import TrainingDataImporter
 from rasa.shared.nlu.training_data.training_data import TrainingData
 import rasa.shared.utils.io
 import rasa.shared.data
-from rasa.core.utils import get_file_hash
+# from rasa.core.utils import get_file_hash
+import rasa_addons.utils as addons_utils
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ class BotfrontFileImporter(TrainingDataImporter):
             training_data_paths, rasa.shared.data.is_nlu_file
         )
         self._story_files = rasa.shared.data.get_data_files(
-            training_data_paths, rasa.shared.data.is_story_file
+            training_data_paths, addons_utils.is_story_file
         )
 
         self.core_config = {}
@@ -72,8 +73,8 @@ class BotfrontFileImporter(TrainingDataImporter):
         return await utils.story_graph_from_paths(
             self._story_files,
             await self.get_domain(),
-            template_variables,
-            use_e2e,
+            #template_variables,
+            #use_e2e,
             exclusion_percentage,
         )
 
@@ -81,7 +82,7 @@ class BotfrontFileImporter(TrainingDataImporter):
         # Use a file hash of stories file to figure out Core fingerprint, instead of
         # storygraph object hash which is unstable
         if isinstance(self._story_files, list) and len(self._story_files):
-            return get_file_hash(self._story_files[0])
+            return addons_utils.get_file_hash(self._story_files[0])
         return 0
 
     async def get_nlu_data(self, languages=True) -> Dict[Text, TrainingData]:
@@ -115,3 +116,4 @@ class BotfrontFileImporter(TrainingDataImporter):
             logger.error(e)
         finally:
             return domain
+

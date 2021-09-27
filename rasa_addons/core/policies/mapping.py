@@ -18,7 +18,7 @@ from rasa.shared.core.domain import Domain
 from rasa.shared.core.events import ActionExecuted
 from rasa.core.policies.policy import Policy
 from rasa.shared.core.trackers import DialogueStateTracker
-from rasa.core.constants import MAPPING_POLICY_PRIORITY
+from rasa.core.constants import UNLIKELY_INTENT_POLICY_PRIORITY
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ class BotfrontMappingPolicy(Policy):
         "triggers": [{"trigger": r"^map\..+", "action": "action_botfront_mapping"}]
     }
 
-    def __init__(self, priority: int = MAPPING_POLICY_PRIORITY, **kwargs: Any) -> None:
+    def __init__(self, priority: int = UNLIKELY_INTENT_POLICY_PRIORITY, **kwargs: Any) -> None:
         super(BotfrontMappingPolicy, self).__init__(priority=priority)
         self._load_params(**kwargs)
 

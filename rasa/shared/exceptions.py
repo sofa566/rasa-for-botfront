@@ -24,10 +24,6 @@ class InvalidParameterException(RasaException, ValueError):
     """Raised when an invalid parameter is used."""
 
 
-class MarkdownException(RasaException, ValueError):
-    """Raised if there is an error reading Markdown."""
-
-
 class YamlException(RasaException):
     """Raised if there is an error reading yaml."""
 
@@ -101,7 +97,7 @@ class InvalidEntityFormatException(RasaException, json.JSONDecodeError):
     def create_from(
         cls, other: json.JSONDecodeError, msg: Text
     ) -> "InvalidEntityFormatException":
-        """Create an instance of `InvalidEntityFormatException` from a `JSONDecodeError`."""
+        """Creates `InvalidEntityFormatException` from `JSONDecodeError`."""
         return cls(msg, other.doc, other.pos)
 
 

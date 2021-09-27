@@ -3,8 +3,6 @@ import itertools
 import json
 import logging
 import os
-import pickle
-from datetime import datetime, timezone
 
 from time import sleep
 from typing import (
@@ -18,9 +16,11 @@ from typing import (
     Text,
     Union,
     TYPE_CHECKING,
+    Generator,
 )
 
 from boto3.dynamodb.conditions import Key
+from pymongo.collection import Collection
 
 import rasa.core.utils as core_utils
 import rasa.shared.utils.cli
@@ -41,18 +41,18 @@ from rasa.shared.core.trackers import (
     DialogueStateTracker,
     EventVerbosity,
 )
-from rasa.shared.exceptions import ConnectionException
+from rasa.shared.exceptions import ConnectionException, RasaException
 from rasa.shared.nlu.constants import INTENT_NAME_KEY
 from rasa.utils.endpoints import EndpointConfig
 import sqlalchemy as sa
+from sqlalchemy.ext.declarative import declarative_base, DeclarativeMeta
 
 if TYPE_CHECKING:
     import boto3.resources.factory.dynamodb.Table
     from sqlalchemy.engine.url import URL
     from sqlalchemy.engine.base import Engine
-    from sqlalchemy.orm.session import Session
+    from sqlalchemy.orm import Session, Query
     from sqlalchemy import Sequence
-    from sqlalchemy.orm.query import Query
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,10 @@ POSTGRESQL_DEFAULT_POOL_SIZE = 50
 
 # default value for key prefix in RedisTrackerStore
 DEFAULT_REDIS_TRACKER_STORE_KEY_PREFIX = "tracker:"
+
+
+class TrackerDeserialisationException(RasaException):
+    """Raised when an error is encountered while deserialising a tracker."""
 
 
 class TrackerStore:
@@ -85,26 +89,6 @@ class TrackerStore:
         self.event_broker = event_broker
         self.max_event_history = None
 
-        # TODO: Remove this in Rasa Open Source 3.0
-        self.retrieve_events_from_previous_conversation_sessions: Optional[bool] = None
-        self._set_deprecated_kwargs_and_emit_warning(kwargs)
-
-    def _set_deprecated_kwargs_and_emit_warning(self, kwargs: Dict[Text, Any]) -> None:
-        retrieve_events_from_previous_conversation_sessions = kwargs.get(
-            "retrieve_events_from_previous_conversation_sessions"
-        )
-
-        if retrieve_events_from_previous_conversation_sessions is not None:
-            rasa.shared.utils.io.raise_deprecation_warning(
-                f"Specifying the `retrieve_events_from_previous_conversation_sessions` "
-                f"kwarg for the `{self.__class__.__name__}` class is deprecated and "
-                f"will be removed in Rasa Open Source 3.0. "
-                f"Please use the `retrieve_full_tracker()` method instead."
-            )
-            self.retrieve_events_from_previous_conversation_sessions = (
-                retrieve_events_from_previous_conversation_sessions
-            )
-
     @staticmethod
     def create(
         obj: Union["TrackerStore", EndpointConfig, None],
@@ -125,8 +109,12 @@ class TrackerStore:
             BotoCoreError,
             pymongo.errors.ConnectionFailure,
             sqlalchemy.exc.OperationalError,
+            ConnectionError,
+            pymongo.errors.OperationFailure,
         ) as error:
-            raise ConnectionException("Cannot connect to tracker store.") from error
+            raise ConnectionException(
+                "Cannot connect to tracker store." + str(error)
+            ) from error
 
     def get_or_create_tracker(
         self,
@@ -183,9 +171,23 @@ class TrackerStore:
 
         return tracker
 
-    def save(self, tracker):
-        """Save method that will be overridden by specific tracker"""
+    def save(self, tracker: DialogueStateTracker) -> None:
+        """Save method that will be overridden by specific tracker."""
         raise NotImplementedError()
+
+    def exists(self, conversation_id: Text) -> bool:
+        """Checks if tracker exists for the specified ID.
+
+        This method may be overridden by the specific tracker store for
+        faster implementations.
+
+        Args:
+            conversation_id: Conversation ID to check if the tracker exists.
+
+        Returns:
+            `True` if the tracker exists, `False` otherwise.
+        """
+        return self.retrieve(conversation_id) is not None
 
     def retrieve(self, sender_id: Text) -> Optional[DialogueStateTracker]:
         """Retrieves tracker for the latest conversation session.
@@ -242,34 +244,20 @@ class TrackerStore:
 
         return json.dumps(dialogue.as_dict())
 
-    @staticmethod
-    def _deserialize_dialogue_from_pickle(
-        sender_id: Text, serialised_tracker: bytes
-    ) -> Dialogue:
-        # TODO: Remove in Rasa Open Source 3.0
-        rasa.shared.utils.io.raise_deprecation_warning(
-            f"Found pickled tracker for "
-            f"conversation ID '{sender_id}'. Deserialization of pickled "
-            f"trackers is deprecated and will be removed in Rasa Open Source 3.0. Rasa "
-            f"will perform any future save operations of this tracker using json "
-            f"serialisation."
-        )
-
-        return pickle.loads(serialised_tracker)
-
     def deserialise_tracker(
         self, sender_id: Text, serialised_tracker: Union[Text, bytes]
     ) -> Optional[DialogueStateTracker]:
         """Deserializes the tracker and returns it."""
-
         tracker = self.init_tracker(sender_id)
 
         try:
             dialogue = Dialogue.from_parameters(json.loads(serialised_tracker))
-        except UnicodeDecodeError:
-            dialogue = self._deserialize_dialogue_from_pickle(
-                sender_id, serialised_tracker
-            )
+        except UnicodeDecodeError as e:
+            raise TrackerDeserialisationException(
+                "Tracker cannot be deserialised. "
+                "Trackers must be serialised as json. "
+                "Support for deserialising pickled trackers has been removed."
+            ) from e
 
         tracker.recreate_from_dialogue(dialogue)
 
@@ -314,10 +302,10 @@ class RedisTrackerStore(TrackerStore):
 
     def __init__(
         self,
-        domain,
-        host="localhost",
-        port=6379,
-        db=0,
+        domain: Domain,
+        host: Text = "localhost",
+        port: int = 6379,
+        db: int = 0,
         password: Optional[Text] = None,
         event_broker: Optional[EventBroker] = None,
         record_exp: Optional[float] = None,
@@ -344,14 +332,17 @@ class RedisTrackerStore(TrackerStore):
             self.key_prefix = key_prefix + ":" + DEFAULT_REDIS_TRACKER_STORE_KEY_PREFIX
         else:
             logger.warning(
-                f"Omitting provided non-alphanumeric redis key prefix: '{key_prefix}'. Using default '{self.key_prefix}' instead."
+                f"Omitting provided non-alphanumeric redis key prefix: '{key_prefix}'. "
+                f"Using default '{self.key_prefix}' instead."
             )
 
     def _get_key_prefix(self) -> Text:
         return self.key_prefix
 
-    def save(self, tracker, timeout=None):
-        """Saves the current conversation state"""
+    def save(
+        self, tracker: DialogueStateTracker, timeout: Optional[float] = None
+    ) -> None:
+        """Saves the current conversation state."""
         if self.event_broker:
             self.stream_events(tracker)
 
@@ -439,53 +430,15 @@ class DynamoTrackerStore(TrackerStore):
         else:
             table = dynamo.Table(table_name)
 
-            column_names = [
-                attribute["AttributeName"] for attribute in table.attribute_definitions
-            ]
-            if "session_date" in column_names:
-                rasa.shared.utils.io.raise_warning(
-                    "Attribute 'session_date' is no longer required when using a "
-                    "DynamoDB TrackerStore. Please remove this attribute from "
-                    "any existing tables.",
-                    FutureWarning,
-                )
-
         return table
 
-    def save(self, tracker):
+    def save(self, tracker: DialogueStateTracker) -> None:
         """Saves the current conversation state."""
-        from botocore.exceptions import ClientError
-
         if self.event_broker:
             self.stream_events(tracker)
         serialized = self.serialise_tracker(tracker)
 
-        try:
-            self.db.put_item(Item=serialized)
-        except ClientError as e:
-            if "Missing the key session_date" in repr(e):
-                # the session_date attribute got removed as it was useless
-                # old databases will still contain an attribute for it though
-                # which we need to set (otherwise we are getting the error we
-                # just ran into) this section should be removed in 3.0
-                legacy_date = self._retrieve_latest_session_date(tracker.sender_id)
-
-                serialized["session_date"] = legacy_date
-                self.db.put_item(Item=serialized)
-            else:
-                raise
-
-    def _retrieve_latest_session_date(self, sender_id: Text) -> Optional[int]:
-        dialogues = self.db.query(
-            KeyConditionExpression=Key("sender_id").eq(sender_id),
-            Limit=1,
-            ScanIndexForward=False,
-        )["Items"]
-
-        if not dialogues:
-            return int(datetime.now(tz=timezone.utc).timestamp())
-
-        return dialogues[0].get("session_date")
+        self.db.put_item(Item=serialized)
 
     def serialise_tracker(self, tracker: "DialogueStateTracker") -> Dict:
         """Serializes the tracker, returns object with decimal types."""
@@ -563,11 +516,11 @@ class MongoTrackerStore(TrackerStore):
         self._ensure_indices()
 
     @property
-    def conversations(self):
+    def conversations(self) -> Collection:
         """Returns the current conversation."""
         return self.db[self.collection]
 
-    def _ensure_indices(self):
+    def _ensure_indices(self) -> None:
         """Create an index on the sender_id."""
         self.conversations.create_index("sender_id")
 
@@ -580,7 +533,7 @@ class MongoTrackerStore(TrackerStore):
 
         return state
 
-    def save(self, tracker, timeout=None):
+    def save(self, tracker: DialogueStateTracker) -> None:
         """Saves the current conversation state."""
         if self.event_broker:
             self.stream_events(tracker)
@@ -611,6 +564,7 @@ class MongoTrackerStore(TrackerStore):
 
         stored = self.conversations.find_one({"sender_id": tracker.sender_id}) or {}
         all_events = self._events_from_serialized_tracker(stored)
+
         number_events_since_last_session = len(
             self._events_since_last_session_start(all_events)
         )
@@ -671,11 +625,7 @@ class MongoTrackerStore(TrackerStore):
         return events
 
     def retrieve(self, sender_id: Text) -> Optional[DialogueStateTracker]:
-        # TODO: Remove this in Rasa Open Source 3.0 along with the
-        # deprecation warning in the constructor
-        if self.retrieve_events_from_previous_conversation_sessions:
-            return self.retrieve_full_tracker(sender_id)
-
+        """Retrieves tracker for the latest conversation session."""
         events = self._retrieve(sender_id, fetch_events_from_all_sessions=False)
 
         if not events:
@@ -686,6 +636,7 @@ class MongoTrackerStore(TrackerStore):
     def retrieve_full_tracker(
         self, conversation_id: Text
     ) -> Optional[DialogueStateTracker]:
+        """Fetching all tracker events across conversation sessions."""
         events = self._retrieve(conversation_id, fetch_events_from_all_sessions=True)
 
         if not events:
@@ -796,12 +747,10 @@ def ensure_schema_exists(session: "Session") -> None:
 class SQLTrackerStore(TrackerStore):
     """Store which can save and retrieve trackers from an SQL database."""
 
-    from sqlalchemy.ext.declarative import declarative_base
-
-    Base = declarative_base()
+    Base: DeclarativeMeta = declarative_base()
 
     class SQLEvent(Base):
-        """Represents an event in the SQL Tracker Store"""
+        """Represents an event in the SQL Tracker Store."""
 
         __tablename__ = "events"
 
@@ -928,7 +877,7 @@ class SQLTrackerStore(TrackerStore):
             query=query,
         )
 
-    def _create_database_and_update_engine(self, db: Text, engine_url: "URL"):
+    def _create_database_and_update_engine(self, db: Text, engine_url: "URL") -> None:
         """Creates database `db` and updates engine accordingly."""
         from sqlalchemy import create_engine
 
@@ -939,13 +888,22 @@ class SQLTrackerStore(TrackerStore):
             return
 
         self._create_database(self.engine, db)
-        engine_url.database = db
+        self.engine.dispose()
+        engine_url = sa.engine.url.URL(
+            drivername=engine_url.drivername,
+            username=engine_url.username,
+            password=engine_url.password,
+            host=engine_url.host,
+            port=engine_url.port,
+            database=db,
+            query=engine_url.query,
+        )
         self.engine = create_engine(engine_url)
 
     @staticmethod
     def _create_database(engine: "Engine", database_name: Text) -> None:
         """Create database `db` on `engine` if it does not exist."""
-        import psycopg2
+        import sqlalchemy.exc
 
         conn = engine.connect()
 
@@ -964,13 +922,16 @@ class SQLTrackerStore(TrackerStore):
         if not matching_rows:
             try:
                 conn.execute(f"CREATE DATABASE {database_name}")
-            except psycopg2.IntegrityError as e:
+            except (
+                sqlalchemy.exc.ProgrammingError,
+                sqlalchemy.exc.IntegrityError,
+            ) as e:
                 logger.error(f"Could not create database '{database_name}': {e}")
 
         conn.close()
 
     @contextlib.contextmanager
-    def session_scope(self):
+    def session_scope(self) -> Generator["Session", None, None]:
         """Provide a transactional scope around a series of operations."""
         session = self.sessionmaker()
         try:
@@ -987,22 +948,19 @@ class SQLTrackerStore(TrackerStore):
             session.close()
 
     def keys(self) -> Iterable[Text]:
-        """Returns sender_ids of the SQLTrackerStore"""
+        """Returns sender_ids of the SQLTrackerStore."""
         with self.session_scope() as session:
             sender_ids = session.query(self.SQLEvent.sender_id).distinct().all()
             return [sender_id for (sender_id,) in sender_ids]
 
     def retrieve(self, sender_id: Text) -> Optional[DialogueStateTracker]:
-        # TODO: Remove this in Rasa Open Source 3.0 along with the
-        # deprecation warning in the constructor
-        if self.retrieve_events_from_previous_conversation_sessions:
-            return self.retrieve_full_tracker(sender_id)
-
+        """Retrieves tracker for the latest conversation session."""
         return self._retrieve(sender_id, fetch_events_from_all_sessions=False)
 
     def retrieve_full_tracker(
         self, conversation_id: Text
     ) -> Optional[DialogueStateTracker]:
+        """Fetching all tracker events across conversation sessions."""
         return self._retrieve(conversation_id, fetch_events_from_all_sessions=True)
 
     def _retrieve(
@@ -1108,10 +1066,10 @@ class SQLTrackerStore(TrackerStore):
         self, session: "Session", tracker: DialogueStateTracker
     ) -> Iterator:
         """Return events from the tracker which aren't currently stored."""
-
         number_of_events_since_last_session = self._event_query(
             session, tracker.sender_id, fetch_events_from_all_sessions=False
         ).count()
+
         return itertools.islice(
             tracker.events, number_of_events_since_last_session, len(tracker.events)
         )

@@ -29,11 +29,6 @@ def create_interpreter(
 
     if isinstance(obj, rasa.shared.nlu.interpreter.NaturalLanguageInterpreter):
         return obj
-    # bf>
-    elif isinstance(obj, dict):
-        from rasa_addons.core.interpreter import MultilingualNLUInterpreter
-        return MultilingualNLUInterpreter(model_directory=obj)
-    # </bf
     elif isinstance(obj, str) and os.path.exists(obj):
         return RasaNLUInterpreter(model_directory=obj)
     elif isinstance(obj, str):
@@ -44,6 +39,7 @@ def create_interpreter(
         return rasa.shared.nlu.interpreter.RegexInterpreter()
     else:
         return _create_from_endpoint_config(obj)
+
 
 class RasaNLUHttpInterpreter(rasa.shared.nlu.interpreter.NaturalLanguageInterpreter):
     def __init__(self, endpoint_config: Optional[EndpointConfig] = None) -> None:
@@ -76,9 +72,10 @@ class RasaNLUHttpInterpreter(rasa.shared.nlu.interpreter.NaturalLanguageInterpre
         self, text: Text, message_id: Optional[Text] = None
     ) -> Optional[Dict[Text, Any]]:
         """Send a text message to a running rasa NLU http server.
-        Return `None` on failure."""
 
-        if not self.endpoint_config:
+        Return `None` on failure.
+        """
+        if not self.endpoint_config or self.endpoint_config.url is None:
             logger.error(
                 f"Failed to parse text '{text}' using rasa NLU over http. "
                 f"No rasa NLU server specified!"
@@ -155,7 +152,8 @@ class RasaNLUInterpreter(rasa.shared.nlu.interpreter.NaturalLanguageInterpreter)
         Args:
             message: storing text to process
         Returns:
-            message containing tokens and features which are the output of the NLU pipeline
+            message containing tokens and features which are the output of the NLU
+            pipeline
         """
         if self.lazy_init and self.interpreter is None:
             self._load_interpreter()

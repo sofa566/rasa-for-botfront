@@ -23,12 +23,12 @@ ACTION_RESTART_NAME = "action_restart"
 ACTION_SESSION_START_NAME = "action_session_start"
 ACTION_DEFAULT_FALLBACK_NAME = "action_default_fallback"
 ACTION_DEACTIVATE_LOOP_NAME = "action_deactivate_loop"
-LEGACY_ACTION_DEACTIVATE_LOOP_NAME = "action_deactivate_form"
 ACTION_REVERT_FALLBACK_EVENTS_NAME = "action_revert_fallback_events"
 ACTION_DEFAULT_ASK_AFFIRMATION_NAME = "action_default_ask_affirmation"
 ACTION_DEFAULT_ASK_REPHRASE_NAME = "action_default_ask_rephrase"
 ACTION_BACK_NAME = "action_back"
 ACTION_TWO_STAGE_FALLBACK_NAME = "action_two_stage_fallback"
+ACTION_UNLIKELY_INTENT_NAME = "action_unlikely_intent"
 RULE_SNIPPET_ACTION_NAME = "..."
 
 DEFAULT_ACTION_NAMES = [
@@ -41,6 +41,7 @@ DEFAULT_ACTION_NAMES = [
     ACTION_DEFAULT_ASK_AFFIRMATION_NAME,
     ACTION_DEFAULT_ASK_REPHRASE_NAME,
     ACTION_TWO_STAGE_FALLBACK_NAME,
+    ACTION_UNLIKELY_INTENT_NAME,
     ACTION_BACK_NAME,
     RULE_SNIPPET_ACTION_NAME,
 ]
@@ -81,5 +82,17 @@ SLOTS = "slots"
 USE_TEXT_FOR_FEATURIZATION = "use_text_for_featurization"
 ENTITY_LABEL_SEPARATOR = "#"
 
-from rasa_addons.core.action_list import action_list # bf
-DEFAULT_ACTION_NAMES += action_list # bf
+RULE_ONLY_SLOTS = "rule_only_slots"
+RULE_ONLY_LOOPS = "rule_only_loops"
+
+# if you add more policy/classifier names, make sure to add a test as well to ensure
+# that the name and the class stay in sync
+POLICY_NAME_TWO_STAGE_FALLBACK = "TwoStageFallbackPolicy"
+POLICY_NAME_MAPPING = "MappingPolicy"
+POLICY_NAME_FALLBACK = "FallbackPolicy"
+POLICY_NAME_FORM = "FormPolicy"
+POLICY_NAME_RULE = "RulePolicy"
+
+CLASSIFIER_NAME_FALLBACK = "FallbackClassifier"
+
+POLICIES_THAT_EXTRACT_ENTITIES = {"TEDPolicy"}
