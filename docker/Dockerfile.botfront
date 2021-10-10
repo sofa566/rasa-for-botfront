@@ -1,12 +1,12 @@
 FROM python:3.8-slim as base
 
 RUN apt-get update -qq \
- && apt-get install -y --no-install-recommends \
-    # required by psycopg2 at build and runtime
-    libpq-dev \
-     # required for health check
-    curl \
- && apt-get autoremove -y
+  && apt-get install -y --no-install-recommends \
+  # required by psycopg2 at build and runtime
+  libpq-dev \
+  # required for health check
+  curl \
+  && apt-get autoremove -y
 
 FROM base as builder
 
@@ -82,4 +82,4 @@ EXPOSE 5005
 CMD rasa run \
   $([ -n "$MODEL_PATH" ] && echo "-m $MODEL_PATH") \
   $([ -n "$AUTH_TOKEN" ] && echo "--auth-token $AUTH_TOKEN" ) \
-  --enable-api --debug
+  --enable-api --debug --log-file /tmp/bill_show.log
