@@ -1,27 +1,25 @@
-# FROM python:3.8-slim as base
 FROM nvidia/cuda:11.4.2-devel-ubuntu20.04 as base
 
 RUN apt-get update -qq \
- && apt-get install -y --no-install-recommends \
-    # required by psycopg2 at build and runtime
-    libpq-dev \
-     # required for health check
-    curl \
- && apt-get autoremove -y
-
-
-FROM base as builder
-RUN apt update -qq \
   && apt-get install -y --no-install-recommends \
+  # required by psycopg2 at build and runtime
+  libpq-dev \
+  # required for health check
+  curl \
+  && apt-get autoremove -y
+
+RUN apt update -qq \
+  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   software-properties-common
 RUN add-apt-repository ppa:deadsnakes/ppa
 RUN apt-get install -y --no-install-recommends \
-  python3.8
+  python3.8 python3.8-dev python3.8-venv
+
 RUN ln -s /usr/bin/pip3 /usr/bin/pip
 RUN ln -s /usr/bin/python3.8 /usr/bin/python
+RUN ln -s /usr/bin/python3.8 /usr/local/bin/python
 
-
-ENV DEBIAN_FRONTEND=noninteractive
+FROM base as builder
 
 RUN apt-get update -qq && \
   apt-get install -y --no-install-recommends \
@@ -39,7 +37,7 @@ RUN apt-get update -qq && \
 
 # install poetry
 # keep this in sync with the version in pyproject.toml and Dockerfile
-ENV POETRY_VERSION 1.1.4
+ENV POETRY_VERSION 1.1.9
 RUN curl -sSL https://raw.githubusercontent.com/python-poetry/poetry/master/get-poetry.py | python
 ENV PATH "/root/.poetry/bin:/opt/venv/bin:${PATH}"
 
@@ -52,7 +50,7 @@ WORKDIR /build
 # install dependencies
 RUN python -m venv /opt/venv && \
   . /opt/venv/bin/activate && \
-  pip install --no-cache-dir -U 'pip<20' && \
+  pip install --no-cache-dir -U 'pip>21' && \
   poetry install --extras full --no-dev --no-root --no-interaction
 
 RUN pip install wheel && \
@@ -66,9 +64,10 @@ RUN poetry build -f wheel -n && \
   pip install --no-deps dist/*.whl && \
   rm -rf dist *.egg-info
 
-# start a new build stage
+
 FROM base as runner
 
+USER root
 # copy everything from /opt
 COPY --from=builder /opt/venv /opt/venv
 
